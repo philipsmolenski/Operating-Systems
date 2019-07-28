@@ -1,0 +1,435 @@
+diff -rupN source/usr/include/minix/callnr.h destination/usr/include/minix/callnr.h
+--- source/usr/include/minix/callnr.h	2014-09-14 11:00:44.000000000 +0200
++++ destination/usr/include/minix/callnr.h	2019-04-22 21:26:26.651822167 +0200
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_DISTORT_TIME     (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN source/usr/include/unistd.h destination/usr/include/unistd.h
+--- source/usr/include/unistd.h	2014-09-14 11:00:43.000000000 +0200
++++ destination/usr/include/unistd.h	2019-04-23 18:38:13.798305889 +0200
+@@ -85,6 +85,7 @@
+ 
+ __BEGIN_DECLS
+ __dead	 void _exit(int);
++int  distort_time(pid_t pid, uint8_t scale);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+ int	 chdir(const char *);
+diff -rupN source/usr/src/include/unistd.h destination/usr/src/include/unistd.h
+--- source/usr/src/include/unistd.h	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/include/unistd.h	2019-04-23 18:40:17.709766835 +0200
+@@ -85,6 +85,7 @@
+ 
+ __BEGIN_DECLS
+ __dead	 void _exit(int);
++int  distort_time(pid_t pid, uint8_t scale);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+ int	 chdir(const char *);
+diff -rupN source/usr/src/lib/libc/misc/distort_time.c destination/usr/src/lib/libc/misc/distort_time.c
+--- source/usr/src/lib/libc/misc/distort_time.c	1970-01-01 01:00:00.000000000 +0100
++++ destination/usr/src/lib/libc/misc/distort_time.c	2019-04-25 12:13:01.960770843 +0200
+@@ -0,0 +1,30 @@
++#include <lib.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <minix/rs.h>
++
++int get_pm_endpt(endpoint_t *pt) {
++    return minix_rs_lookup("pm", pt);
++}
++
++int distort_time (pid_t pid, uint8_t scale) {
++    endpoint_t pm_pt;
++    message m;
++    m.m_lc_pm_getsid.pid = pid;
++    m.m_lc_pm_getsid.padding[0] = scale;
++    m.m_type = PM_DISTORT_TIME;
++    int status;
++
++    if (get_pm_endpt(&pm_pt) != 0) {
++        errno = ENOSYS;
++        return -1;
++    }
++
++    status = ipc_sendrec(pm_pt, &m);
++    if (status != 0)
++        m.m_type = status;
++
++    return -m.m_type;
++}
+\ No newline at end of file
+diff -rupN source/usr/src/lib/libc/misc/Makefile.inc destination/usr/src/lib/libc/misc/Makefile.inc
+--- source/usr/src/lib/libc/misc/Makefile.inc	2019-04-19 23:09:31.214455238 +0200
++++ destination/usr/src/lib/libc/misc/Makefile.inc	2019-04-23 18:42:06.793292289 +0200
+@@ -7,4 +7,4 @@
+ SRCS+=	initfini.c
+ 
+ # for -fstack-protector
+-SRCS+=	stack_protector.c
++SRCS+=	stack_protector.c distort_time.c
+diff -rupN source/usr/src/minix/include/minix/callnr.h destination/usr/src/minix/include/minix/callnr.h
+--- source/usr/src/minix/include/minix/callnr.h	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/include/minix/callnr.h	2019-04-22 21:27:47.787628336 +0200
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_DISTORT_TIME     (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupN source/usr/src/minix/servers/pm/forkexit.c destination/usr/src/minix/servers/pm/forkexit.c
+--- source/usr/src/minix/servers/pm/forkexit.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/forkexit.c	2019-04-27 16:11:10.392164856 +0200
+@@ -81,6 +81,8 @@ int do_fork()
+   /* PM may not fail fork after call to vm_fork(), as VM calls sys_fork(). */
+ 
+   rmc = &mproc[next_child];
++  got_time[next_child] = RESET;
++  time_change[next_child] = 1;
+   /* Set up the child and its memory map; copy its 'mproc' slot from parent. */
+   procs_in_use++;
+   *rmc = *rmp;			/* copy parent's process slot to child's */
+@@ -178,6 +180,8 @@ int do_srv_fork()
+   }
+ 
+   rmc = &mproc[next_child];
++  got_time[next_child] = RESET;
++  time_change[next_child] = 1;
+   /* Set up the child and its memory map; copy its 'mproc' slot from parent. */
+   procs_in_use++;
+   *rmc = *rmp;			/* copy parent's process slot to child's */
+diff -rupN source/usr/src/minix/servers/pm/main.c destination/usr/src/minix/servers/pm/main.c
+--- source/usr/src/minix/servers/pm/main.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/main.c	2019-04-27 16:13:09.139250944 +0200
+@@ -176,7 +176,8 @@ static int sef_cb_init_fresh(int UNUSED(
+   for (ip = &image[0]; ip < &image[NR_BOOT_PROCS]; ip++) {
+   	if (ip->proc_nr >= 0) {			/* task have negative nrs */
+   		procs_in_use += 1;		/* found user process */
+-
++      got_time[ip - &image[0]] = RESET;
++      time_change[ip - &image[0]] = 1;
+ 		/* Set process details found in the image table. */
+ 		rmp = &mproc[ip->proc_nr];	
+   		strlcpy(rmp->mp_name, ip->proc_name, PROC_NAME_LEN); 
+diff -rupN source/usr/src/minix/servers/pm/mproc.h destination/usr/src/minix/servers/pm/mproc.h
+--- source/usr/src/minix/servers/pm/mproc.h	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/mproc.h	2019-04-27 16:08:50.569432008 +0200
+@@ -13,6 +13,15 @@
+ /* Needs to be included here, for 'ps' etc */
+ #include "const.h"
+ 
++// following constants represent process status considered in gettimeofday function
++#define RESET 0 // means that time was not distorted yet
++#define DISTORTED 1 // means that time was distorted but no checkpoint was set
++#define CHECKPOINT_SET 2 // means the checkpoint is set 
++
++uint32_t checkpoint[NR_PROCS]; // set if checkpoint[i] = CHECKPOINT_SET
++int got_time[NR_PROCS]; // array of process status
++int time_change[NR_PROCS]; // negative values mean that time runs slower
++
+ EXTERN struct mproc {
+   char mp_exitstatus;		/* storage for status when process exits */
+   char mp_sigstatus;		/* storage for signal # for killed procs */
+diff -rupN source/usr/src/minix/servers/pm/proto.h destination/usr/src/minix/servers/pm/proto.h
+--- source/usr/src/minix/servers/pm/proto.h	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/proto.h	2019-04-22 21:28:57.887432582 +0200
+@@ -77,6 +77,7 @@ int do_time(void);
+ int do_getres(void);
+ int do_gettime(void);
+ int do_settime(void);
++int do_distort_time(void);
+ 
+ /* trace.c */
+ int do_trace(void);
+diff -rupN source/usr/src/minix/servers/pm/table.c destination/usr/src/minix/servers/pm/table.c
+--- source/usr/src/minix/servers/pm/table.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/table.c	2019-04-23 00:23:47.142885404 +0200
+@@ -58,5 +58,6 @@ int (* const call_vec[NR_PM_CALLS])(void
+ 	CALL(PM_EXEC_RESTART)	= do_execrestart,
+ 	CALL(PM_GETEPINFO)	= do_getepinfo,		/* getepinfo(2) */
+ 	CALL(PM_GETPROCNR)	= do_getprocnr,		/* getprocnr(2) */
+-	CALL(PM_GETSYSINFO)	= do_getsysinfo		/* getsysinfo(2) */
++	CALL(PM_GETSYSINFO)	= do_getsysinfo,		/* getsysinfo(2) */
++	CALL(PM_DISTORT_TIME) = do_distort_time
+ };
+diff -rupN source/usr/src/minix/servers/pm/time.c destination/usr/src/minix/servers/pm/time.c
+--- source/usr/src/minix/servers/pm/time.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/servers/pm/time.c	2019-04-27 17:04:49.315187341 +0200
+@@ -1,11 +1,11 @@
+ /* This file takes care of those system calls that deal with time.
+  *
+  * The entry points into this file are
+- *   do_getres:		perform the CLOCK_GETRES system call
+- *   do_gettime:	perform the CLOCK_GETTIME system call
+- *   do_settime:	perform the CLOCK_SETTIME system call
+- *   do_time:		perform the GETTIMEOFDAY system call
+- *   do_stime:		perform the STIME system call
++ *   do_getres:   perform the CLOCK_GETRES system call
++ *   do_gettime:  perform the CLOCK_GETTIME system call
++ *   do_settime:  perform the CLOCK_SETTIME system call
++ *   do_time:   perform the GETTIMEOFDAY system call
++ *   do_stime:    perform the STIME system call
+  */
+ 
+ #include "pm.h"
+@@ -15,19 +15,44 @@
+ #include <sys/time.h>
+ #include "mproc.h"
+ 
++#define SEC 1000000000ULL
++
++int get_process (pid_t pid) {
++	for (int i = 0; i < NR_PROCS; i++) 
++		if ((mproc[i].mp_flags & IN_USE) == IN_USE && mproc[i].mp_pid == pid)
++			return i;
++
++	return -1;
++}
++
++int is_ancestor (pid_t a, pid_t b) {
++	int proc_b = get_process(b);
++	int proc_a = get_process(a);
++	while (proc_b != -1 && mproc[proc_b].mp_pid != 1) {
++		int parent = mproc[proc_b].mp_parent;
++		
++		if (parent == proc_a)
++			return 1;
++		
++		proc_b = parent;
++	}
++
++	return 0;
++}
++
+ /*===========================================================================*
+- *				do_gettime				     *
++ *        do_gettime             *
+  *===========================================================================*/
+ int do_gettime()
+ {
+-  clock_t ticks, realtime, clock;
+-  time_t boottime;
+-  int s;
++	clock_t ticks, realtime, clock;
++	time_t boottime;
++	int s;
+ 
+-  if ( (s=getuptime(&ticks, &realtime, &boottime)) != OK)
+-  	panic("do_time couldn't get uptime: %d", s);
++	if ( (s=getuptime(&ticks, &realtime, &boottime)) != OK)
++		panic("do_time couldn't get uptime: %d", s);
+ 
+-  switch (m_in.m_lc_pm_time.clk_id) {
++	switch (m_in.m_lc_pm_time.clk_id) {
+ 	case CLOCK_REALTIME:
+ 		clock = realtime;
+ 		break;
+@@ -36,21 +61,21 @@ int do_gettime()
+ 		break;
+ 	default:
+ 		return EINVAL; /* invalid/unsupported clock_id */
+-  }
++	}
+ 
+-  mp->mp_reply.m_pm_lc_time.sec = boottime + (clock / system_hz);
+-  mp->mp_reply.m_pm_lc_time.nsec =
++	mp->mp_reply.m_pm_lc_time.sec = boottime + (clock / system_hz);
++	mp->mp_reply.m_pm_lc_time.nsec =
+ 	(uint32_t) ((clock % system_hz) * 1000000000ULL / system_hz);
+ 
+-  return(OK);
++	return(OK);
+ }
+ 
+ /*===========================================================================*
+- *				do_getres				     *
++ *        do_getres            *
+  *===========================================================================*/
+ int do_getres()
+ {
+-  switch (m_in.m_lc_pm_time.clk_id) {
++	switch (m_in.m_lc_pm_time.clk_id) {
+ 	case CLOCK_REALTIME:
+ 	case CLOCK_MONOTONIC:
+ 		/* tv_sec is always 0 since system_hz is an int */
+@@ -59,33 +84,40 @@ int do_getres()
+ 		return(OK);
+ 	default:
+ 		return EINVAL; /* invalid/unsupported clock_id */
+-  }
++	}
+ }
+ 
+ /*===========================================================================*
+- *				do_settime				     *
++ *        do_settime             *
+  *===========================================================================*/
+ int do_settime()
+ {
+-  int s;
++	int s;
+ 
+-  if (mp->mp_effuid != SUPER_USER) { 
+-      return(EPERM);
+-  }
++	if (mp->mp_effuid != SUPER_USER) { 
++			return(EPERM);
++	}
+ 
+-  switch (m_in.m_lc_pm_time.clk_id) {
++	switch (m_in.m_lc_pm_time.clk_id) {
+ 	case CLOCK_REALTIME:
+ 		s = sys_settime(m_in.m_lc_pm_time.now, m_in.m_lc_pm_time.clk_id,
+ 			m_in.m_lc_pm_time.sec, m_in.m_lc_pm_time.nsec);
++		
++		if (s == OK) {
++			for (int i = 0; i < NR_PROCS; i++) 
++				if (got_time[i] == CHECKPOINT_SET)
++					got_time[i] = DISTORTED;
++		}
++
+ 		return(s);
+ 	case CLOCK_MONOTONIC: /* monotonic cannot be changed */
+ 	default:
+ 		return EINVAL; /* invalid/unsupported clock_id */
+-  }
++	}
+ }
+ 
+ /*===========================================================================*
+- *				do_time					     *
++ *        do_time              *
+  *===========================================================================*/
+ int do_time()
+ {
+@@ -94,41 +126,92 @@ int do_time()
+  * rotates at a constant rate and that such things as leap seconds do not 
+  * exist.
+  */
+-  clock_t ticks, realtime;
+-  time_t boottime;
+-  int s;
++	clock_t ticks, realtime;
++	time_t boottime;
++	int s;
++
++	if ( (s=getuptime(&ticks, &realtime, &boottime)) != OK)
++		panic("do_time couldn't get uptime: %d", s);
++
++	if (got_time[who_p] != CHECKPOINT_SET) { // no checkpoint 
++		mp->mp_reply.m_pm_lc_time.sec = boottime + (realtime / system_hz);
++		mp->mp_reply.m_pm_lc_time.nsec =
++		(uint32_t) ((realtime % system_hz) * SEC / system_hz);
++		if (got_time[who_p] == DISTORTED) {
++			got_time[who_p] = CHECKPOINT_SET;
++			checkpoint[who_p] = realtime;
++		}
++	}
++	else {  // next executions return scaled times;
++			clock_t new_time = realtime - checkpoint[who_p];
++			if (time_change[who_p] >= 0)
++				new_time *= time_change[who_p];
++			else
++				new_time /= -time_change[who_p];
++
++			mp->mp_reply.m_pm_lc_time.sec = boottime + ((checkpoint[who_p] + new_time) / system_hz);
++			mp->mp_reply.m_pm_lc_time.nsec =
++			(uint32_t) (((checkpoint[who_p] + new_time) % system_hz) * SEC / system_hz);   
++	}
++
++	return(OK);
++}
++
++/*===========================================================================*
++ *        do_distort_time              *
++ *===========================================================================*/
++int do_distort_time() {
++	pid_t pid = m_in.m_lc_pm_getsid.pid;
++	uint8_t scale = m_in.m_lc_pm_getsid.padding[0];
++	int proc_nr = get_process(pid);
++	
++	if (proc_nr == -1)
++		return EINVAL;
++
++	if (pid == mproc[who_p].mp_pid) 
++		return EPERM;
++
++	if (is_ancestor(pid, mproc[who_p].mp_pid)) {
++		time_change[proc_nr] = -scale;
++		if (got_time[proc_nr] == RESET)
++			got_time[proc_nr] = DISTORTED;
++		return OK;
++	}
++
++	else if (is_ancestor(mproc[who_p].mp_pid, pid)) {
++		time_change[proc_nr] = scale;
++			if (got_time[proc_nr] == RESET)
++		got_time[proc_nr] = DISTORTED;
++		return OK;
++	}
+ 
+-  if ( (s=getuptime(&ticks, &realtime, &boottime)) != OK)
+-  	panic("do_time couldn't get uptime: %d", s);
+ 
+-  mp->mp_reply.m_pm_lc_time.sec = boottime + (realtime / system_hz);
+-  mp->mp_reply.m_pm_lc_time.nsec =
+-	(uint32_t) ((realtime % system_hz) * 1000000000ULL / system_hz);
+-  return(OK);
++	else
++		return EPERM;
+ }
+ 
+ /*===========================================================================*
+- *				do_stime				     *
++ *        do_stime             *
+  *===========================================================================*/
+ int do_stime()
+ {
+ /* Perform the stime(tp) system call. Retrieve the system's uptime (ticks 
+  * since boot) and pass the new time in seconds at system boot to the kernel.
+  */
+-  clock_t uptime, realtime;
+-  time_t boottime;
+-  int s;
+-
+-  if (mp->mp_effuid != SUPER_USER) { 
+-      return(EPERM);
+-  }
+-  if ( (s=getuptime(&uptime, &realtime, &boottime)) != OK) 
+-      panic("do_stime couldn't get uptime: %d", s);
+-  boottime = m_in.m_lc_pm_time.sec - (realtime/system_hz);
++	clock_t uptime, realtime;
++	time_t boottime;
++	int s;
++
++	if (mp->mp_effuid != SUPER_USER) { 
++			return(EPERM);
++	}
++	if ( (s=getuptime(&uptime, &realtime, &boottime)) != OK) 
++			panic("do_stime couldn't get uptime: %d", s);
++	boottime = m_in.m_lc_pm_time.sec - (realtime/system_hz);
+ 
+-  s= sys_stime(boottime);		/* Tell kernel about boottime */
+-  if (s != OK)
++	s= sys_stime(boottime);   /* Tell kernel about boottime */
++	if (s != OK)
+ 	panic("pm: sys_stime failed: %d", s);
+ 
+-  return(OK);
++	return(OK);
+ }

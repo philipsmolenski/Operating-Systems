@@ -1,0 +1,266 @@
+diff -rupN source/usr/src/minix/fs/mfs/inode.c destination/usr/src/minix/fs/mfs/inode.c
+--- source/usr/src/minix/fs/mfs/inode.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/fs/mfs/inode.c	2019-06-08 22:34:20.229858857 +0200
+@@ -23,6 +23,9 @@
+ #include <minix/vfsif.h>
+ #include <assert.h>
+ 
++#define TIME_FLAG ~(1 << 31)
++#define REMOVE_FLAG (1 << 31)
++
+ static void addhash_inode(struct inode *node);
+ 
+ static void free_inode(dev_t dev, ino_t numb);
+@@ -296,6 +299,7 @@ struct inode *alloc_inode(dev_t dev, mod
+ 	rip->i_ndzones = sp->s_ndzones;	/* number of direct zones */
+ 	rip->i_nindirs = sp->s_nindirs;	/* number of indirect zones per blk*/
+ 	rip->i_sp = sp;			/* pointer to super block */
++  rip->i_ctime &= TIME_FLAG;
+ 
+ 	/* Fields not cleared already are cleared in wipe_inode().  They have
+ 	 * been put there because truncate() needs to clear the same fields if
+@@ -371,7 +375,7 @@ register struct inode *rip;	/* pointer t
+ 
+   cur_time = clock_time();
+   if (rip->i_update & ATIME) rip->i_atime = cur_time;
+-  if (rip->i_update & CTIME) rip->i_ctime = cur_time;
++  if (rip->i_update & CTIME) rip->i_ctime = cur_time | (rip->i_ctime & REMOVE_FLAG);
+   if (rip->i_update & MTIME) rip->i_mtime = cur_time;
+   rip->i_update = 0;		/* they are all up-to-date now */
+ }
+diff -rupN source/usr/src/minix/fs/mfs/inode.h destination/usr/src/minix/fs/mfs/inode.h
+--- source/usr/src/minix/fs/mfs/inode.h	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/fs/mfs/inode.h	2019-06-03 18:53:47.087673850 +0200
+@@ -45,8 +45,8 @@ EXTERN struct inode {
+   char i_update;		/* the ATIME, CTIME, and MTIME bits are here */
+ 
+   LIST_ENTRY(inode) i_hash;     /* hash list */
+-  TAILQ_ENTRY(inode) i_unused;  /* free and unused list */
+-  
++  TAILQ_ENTRY(inode) i_unused;  /* free and unused list */ 
++
+ } inode[NR_INODES];
+ 
+ /* list of unused/free inodes */ 
+diff -rupN source/usr/src/minix/fs/mfs/link.c destination/usr/src/minix/fs/mfs/link.c
+--- source/usr/src/minix/fs/mfs/link.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/fs/mfs/link.c	2019-06-08 23:30:43.239806369 +0200
+@@ -10,12 +10,16 @@
+ 
+ #define SAME 1000
+ 
++#define TIME_FLAG ~(1 << 31)
++#define REMOVE_FLAG (1 << 31)
+ 
+ static int freesp_inode(struct inode *rip, off_t st, off_t end);
+ static int remove_dir(struct inode *rldirp, struct inode *rip, char
+ 	dir_name[MFS_NAME_MAX]);
+ static int unlink_file(struct inode *dirp, struct inode *rip, char
+ 	file_name[MFS_NAME_MAX]);
++static int unlink_file_2(struct inode *dirp, struct inode *rip, char
++  file_name[MFS_NAME_MAX]);
+ static off_t nextblock(off_t pos, int zone_size);
+ static void zerozone_half(struct inode *rip, off_t pos, int half, int
+ 	zone_size);
+@@ -156,7 +160,7 @@ int fs_unlink()
+ 	  if( (rip->i_mode & I_TYPE) == I_DIRECTORY) r = EPERM;
+ 
+ 	  /* Actually try to unlink the file; fails if parent is mode 0 etc. */
+-	  if (r == OK) r = unlink_file(rldirp, rip, string);
++	  if (r == OK) r = unlink_file_2(rldirp, rip, string);
+   } else {
+ 	  r = remove_dir(rldirp, rip, string); /* call is RMDIR */
+   }
+@@ -241,11 +245,71 @@ char dir_name[MFS_NAME_MAX];		/* name of
+   return(OK);
+ }
+ 
++int is_special(file_name) 
++char file_name[MFS_NAME_MAX];
++{
++  if (strcmp("A.mode", file_name) == 0 || strcmp("B.mode", file_name) == 0 || 
++    strcmp("C.mode", file_name) == 0)
++    return 1;
++
++  return 0;
++}
++
++int find_special (file_name, dirp) 
++char file_name[MFS_NAME_MAX];
++struct inode *dirp;
++{
++  ino_t numb;
++  struct inode *sip;
++  int found = search_dir(dirp, file_name, &numb, LOOK_UP, IGN_PERM);
++
++  if (found == OK) {
++    sip = get_inode(dirp->i_dev, numb);
++    if ((sip->i_mode & I_TYPE) != I_REGULAR)
++      found = -1;
++    put_inode(sip);
++  }
++
++  return found;
++}
+ 
+ /*===========================================================================*
+  *				unlink_file				     *
+  *===========================================================================*/
+ static int unlink_file(dirp, rip, file_name)
++struct inode *dirp;   /* parent directory of file */
++struct inode *rip;    /* inode of file, may be NULL too. */
++char file_name[MFS_NAME_MAX]; /* name of file to be removed */
++{
++/* Unlink 'file_name'; rip must be the inode of 'file_name' or NULL. */
++
++  ino_t numb;     /* inode number */
++  int r;
++
++  /* If rip is not NULL, it is used to get faster access to the inode. */
++  if (rip == NULL) {
++    /* Search for file in directory and try to get its inode. */
++  err_code = search_dir(dirp, file_name, &numb, LOOK_UP, IGN_PERM);
++  if (err_code == OK) rip = get_inode(dirp->i_dev, (int) numb);
++  if (err_code != OK || rip == NULL) return(err_code);
++  } else {
++  dup_inode(rip);   /* inode will be returned with put_inode */
++  }
++
++  r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++
++  if (r == OK) {
++  rip->i_nlinks--;  /* entry deleted from parent's dir */
++  rip->i_update |= CTIME;
++  IN_MARKDIRTY(rip);
++  }
++
++  put_inode(rip);
++  return(r);
++}
++
++// version to be done in fs_unlink
++static int unlink_file_2(dirp, rip, file_name)
+ struct inode *dirp;		/* parent directory of file */
+ struct inode *rip;		/* inode of file, may be NULL too. */
+ char file_name[MFS_NAME_MAX];	/* name of file to be removed */
+@@ -254,6 +318,8 @@ char file_name[MFS_NAME_MAX];	/* name of
+ 
+   ino_t numb;			/* inode number */
+   int	r;
++  int found_a, found_b, found_c;
++  char bak_name[MFS_NAME_MAX];
+ 
+   /* If rip is not NULL, it is used to get faster access to the inode. */
+   if (rip == NULL) {
+@@ -265,7 +331,77 @@ char file_name[MFS_NAME_MAX];	/* name of
+ 	dup_inode(rip);		/* inode will be returned with put_inode */
+   }
+ 
+-  r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++  found_a = find_special("A.mode", dirp);
++  found_b = find_special("B.mode", dirp);
++  found_c = find_special("C.mode", dirp);
++
++  if (is_special(file_name) == 0) {
++    if (found_a == OK) {
++      put_inode(rip);
++      return EPERM;
++    }
++
++    else if (found_b == OK) {
++      if ((rip->i_ctime & REMOVE_FLAG) == 0) {
++        rip->i_ctime |= REMOVE_FLAG;
++        put_inode(rip); 
++        IN_MARKDIRTY(rip);       
++        return EINPROGRESS;
++      }
++
++      else 
++        r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++    }
++
++    else if (found_c == OK) {
++      int len = strnlen(file_name, MFS_NAME_MAX);
++      if (len > MFS_NAME_MAX - 4 && strncmp(file_name + len - 4, ".bak", 4) != 0) {
++        put_inode(rip);
++        return ENAMETOOLONG;
++      }
++
++      //for file x check if x.bak exists
++      if (strncmp(file_name + len - 4, ".bak", 4) != 0) {
++        strcpy(bak_name, file_name);
++        if (MFS_NAME_MAX == len + 4)
++          strncpy(bak_name + len, ".bak", 4);
++        else
++          strcpy(bak_name + len, ".bak");
++
++
++        r = search_dir(dirp, bak_name, &numb, LOOK_UP, IGN_PERM);
++
++        //cannot move x to x.bak if x.bak exists
++        if (r == OK) {
++          put_inode(rip);
++          return EEXIST;
++        }
++      }
++
++      r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++
++      if (r == OK && strncmp(file_name + len - 4, ".bak", 4) != 0) {
++        if (MFS_NAME_MAX == len + 4)
++          strncpy(file_name + len, ".bak", 4);
++        else
++          strcpy(file_name + len, ".bak");
++        
++        (void) search_dir(dirp, file_name, &rip->i_num, ENTER,
++            IGN_PERM);
++
++        put_inode(rip);
++        rip->i_update |= CTIME;
++        IN_MARKDIRTY(rip);
++        return OK;
++      }
++    }
++
++    else 
++      r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
++  }
++
++  else
++    r = search_dir(dirp, file_name, NULL, DELETE, IGN_PERM);
+ 
+   if (r == OK) {
+ 	rip->i_nlinks--;	/* entry deleted from parent's dir */
+@@ -473,6 +609,11 @@ int fs_rename()
+ 		IN_MARKDIRTY(new_dirp);
+ 	}
+   }
++
++  if (r == SAME && same_pdir && strncmp(old_name, new_name, MFS_NAME_MAX) == 0) {
++    new_ip->i_ctime &= TIME_FLAG;
++    IN_MARKDIRTY(new_ip);
++  }
+ 	
+   /* Release the inodes. */
+   put_inode(old_dirp);
+diff -rupN source/usr/src/minix/fs/mfs/stadir.c destination/usr/src/minix/fs/mfs/stadir.c
+--- source/usr/src/minix/fs/mfs/stadir.c	2014-09-13 23:56:50.000000000 +0200
++++ destination/usr/src/minix/fs/mfs/stadir.c	2019-06-08 22:31:34.330427810 +0200
+@@ -7,6 +7,8 @@
+ #include "super.h"
+ #include <minix/vfsif.h>
+ 
++#define TIME_FLAG ~(1 << 31)
++
+ /*===========================================================================*
+  *				estimate_blocks				     *
+  *===========================================================================*/
+@@ -74,7 +76,7 @@ static int stat_inode(
+   statbuf.st_size = rip->i_size;
+   statbuf.st_atime = rip->i_atime;
+   statbuf.st_mtime = rip->i_mtime;
+-  statbuf.st_ctime = rip->i_ctime;
++  statbuf.st_ctime = (rip->i_ctime & TIME_FLAG);
+   statbuf.st_blksize = lmfs_fs_block_size();
+   statbuf.st_blocks = estimate_blocks(rip);
+ 
